@@ -1,0 +1,9 @@
+[package]
+name = "example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hyper-idp = { path = "../" }
+structopt = "0.3.26"
+tokio = { version = "1.37.0", features = ["sync"] }
