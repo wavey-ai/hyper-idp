@@ -1,4 +1,7 @@
+use crate::claims::decode_jwt;
 use bytes::Bytes;
+use cookie::Cookie;
+use http::header::{CONTENT_TYPE, COOKIE};
 use http::{Method, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -7,9 +10,12 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
 use pki_types::{CertificateDer, PrivateKeyDer};
+use regex::Regex;
 use reqwest::Client;
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -32,6 +38,7 @@ pub struct IdpCreds {
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
+    pub signing_cert: Vec<u8>,
 }
 
 pub struct IdpServer {
@@ -127,6 +134,7 @@ async fn handle_request(
     let response = match (req.method(), req.uri().path()) {
         (&Method::GET, "/login") => redirect_to_auth(creds).await,
         (&Method::GET, "/callback") => handle_auth_callback(req, creds).await,
+        (&Method::GET, "/profile") => profile(req, creds).await,
         _ => {
             let mut response: Response<Full<Bytes>> = Response::new(Full::default());
             *response.status_mut() = StatusCode::NOT_FOUND;
@@ -218,17 +226,45 @@ async fn exchange_code_for_tokens(
     Ok(response)
 }
 
-fn add_cors_headers(res: &mut http::Response<()>) {
-    res.headers_mut()
-        .insert("access-control-allow-origin", "*".parse().unwrap());
-    res.headers_mut().insert(
-        "access-control-allow-methods",
-        "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap(),
-    );
-    res.headers_mut().insert(
-        "access-control-allow-headers",
-        "Content-Type".parse().unwrap(),
-    );
+async fn profile(
+    req: http::Request<Incoming>,
+    creds: Arc<IdpCreds>,
+) -> Result<Response<Full<Bytes>>, Box<dyn Error + Send + Sync>> {
+    let mut cookie_string = String::new();
+    for header in req.headers().get_all(COOKIE) {
+        if let Ok(header_value) = header.to_str() {
+            if !cookie_string.is_empty() {
+                cookie_string.push(';');
+            }
+            cookie_string.push_str(header_value);
+        }
+    }
+    let cookies: HashMap<String, String> = cookie_string
+        .split(';')
+        .filter_map(|c| Cookie::parse(c.trim()).ok())
+        .map(|c| (c.name().to_owned(), c.value().to_owned()))
+        .collect();
+
+    if let Some(token) = cookies.get("id_token") {
+        // aud in the case ot Auth0 is client_id
+        match decode_jwt(token, &creds.signing_cert, &creds.client_id) {
+            Ok(claims) => {
+                let json_response = serde_json::to_string(&claims)?;
+                let response = Response::builder()
+                    .status(StatusCode::OK)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Full::from(json_response))?;
+                return Ok(response);
+            }
+            Err(e) => {
+                eprintln!("JWT decode error: {e}");
+            }
+        }
+    }
+
+    let mut response: Response<Full<Bytes>> = Response::new(Full::default());
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    Ok(response)
 }
 
 fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
