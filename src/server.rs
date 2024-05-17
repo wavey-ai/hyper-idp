@@ -1,8 +1,8 @@
-use crate::claims::decode_jwt;
+use crate::claims::{get_user, User};
 use bytes::Bytes;
 use cookie::Cookie;
 use h3::server::RequestStream;
-use http::header::{CONTENT_TYPE, COOKIE};
+use http::header::CONTENT_TYPE;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -253,49 +253,33 @@ async fn request_handler(
                 "access_token={}; HttpOnly; Path=/; Secure",
                 tokens.access_token
             );
-            let id_cookie = format!("id_token={}; HttpOnly; Path=/; Secure", tokens.id_token);
+            let id_cookie = format!(
+                "id_token={}; HttpOnly; Path=/; Secure;  SameSite=Strict",
+                tokens.id_token
+            );
 
             res = res
                 .header(SET_COOKIE, access_cookie)
                 .header(SET_COOKIE, id_cookie)
                 .status(StatusCode::OK);
         }
-        (&Method::GET, PROFILE_PATH) => {
-            let mut cookie_string = String::new();
-            for header in headers.get_all(COOKIE) {
-                if let Ok(header_value) = header.to_str() {
-                    if !cookie_string.is_empty() {
-                        cookie_string.push(';');
-                    }
-                    cookie_string.push_str(header_value);
+        (&Method::GET, PROFILE_PATH) => match get_claims(headers, creds) {
+            Ok(claims) => {
+                if let Ok(json_response) = serde_json::to_string(&claims) {
+                    let body_bytes = Bytes::from(json_response);
+                    res = res
+                        .status(StatusCode::OK)
+                        .header(CONTENT_TYPE, "application/json");
+                    body = Some(body_bytes);
+                } else {
+                    error!("Serialization failed for claims: {:?}", &claims);
                 }
             }
-            let cookies: HashMap<String, String> = cookie_string
-                .split(';')
-                .filter_map(|c| Cookie::parse(c.trim()).ok())
-                .map(|c| (c.name().to_owned(), c.value().to_owned()))
-                .collect();
-
-            if let Some(token) = cookies.get("id_token") {
-                // aud in the case ot Auth0 is client_id
-                match decode_jwt(token, &creds.signing_cert, &creds.client_id) {
-                    Ok(claims) => {
-                        let json_response = serde_json::to_string(&claims)?;
-                        let body_bytes = Bytes::from(json_response);
-                        res = res
-                            .status(StatusCode::OK)
-                            .header(CONTENT_TYPE, "application/json");
-                        body = Some(body_bytes);
-                    }
-                    Err(e) => {
-                        error!("JWT decode error: {e}");
-                        res = res.status(StatusCode::UNAUTHORIZED);
-                    }
-                }
-            } else {
+            Err(e) => {
+                error!("JWT decode error: {e}");
                 res = res.status(StatusCode::UNAUTHORIZED);
             }
-        }
+        },
         (&Method::GET, LOGOUT_PATH) => {
             res = res.status(StatusCode::NOT_FOUND);
         }
@@ -372,6 +356,39 @@ async fn exchange_code_for_tokens(
         .await?;
 
     Ok(response)
+}
+
+pub fn get_claims(
+    headers: &http::HeaderMap,
+    creds: Arc<IdpCreds>,
+) -> Result<User, Box<dyn std::error::Error + Send + Sync>> {
+    let mut cookie_string = String::new();
+    for header in headers.get_all(http::header::COOKIE) {
+        if let Ok(header_value) = header.to_str() {
+            if !cookie_string.is_empty() {
+                cookie_string.push(';');
+            }
+            cookie_string.push_str(header_value);
+        }
+    }
+
+    let cookies: HashMap<String, String> = cookie_string
+        .split(';')
+        .filter_map(|c| Cookie::parse(c.trim()).ok())
+        .map(|c| (c.name().to_owned(), c.value().to_owned()))
+        .collect();
+
+    // TODO: this violates the OIDC spec by using ID Tokens not Access tokens
+    // for API calls. But we control the horizontal and the vertical and need
+    // identity info.
+    if let Some(token) = cookies.get("id_token") {
+        get_user(token, &creds.signing_cert, &creds.client_id)
+    } else {
+        Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "id_token not found",
+        )) as Box<dyn std::error::Error + Send + Sync>)
+    }
 }
 
 fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
