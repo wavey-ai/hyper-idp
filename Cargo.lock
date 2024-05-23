@@ -429,7 +429,7 @@ dependencies = [
 [[package]]
 name = "h3"
 version = "0.0.4"
-source = "git+https://github.com/hyperium/h3.git#eb79204f170681f7334d25d1a6aa72718eee35db"
+source = "git+https://github.com/hyperium/h3.git?rev=eb79204#eb79204f170681f7334d25d1a6aa72718eee35db"
 dependencies = [
  "bytes",
  "fastrand",
@@ -443,7 +443,7 @@ dependencies = [
 [[package]]
 name = "h3-quinn"
 version = "0.0.5"
-source = "git+https://github.com/hyperium/h3.git#eb79204f170681f7334d25d1a6aa72718eee35db"
+source = "git+https://github.com/hyperium/h3.git?rev=eb79204#eb79204f170681f7334d25d1a6aa72718eee35db"
 dependencies = [
  "bytes",
  "futures",

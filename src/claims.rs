@@ -8,6 +8,12 @@ pub struct User {
     id: u64,
 }
 
+impl User {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     sub: Option<String>,
