@@ -10,19 +10,16 @@ use hyper::header::SET_COOKIE;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
-use pki_types::{CertificateDer, PrivateKeyDer};
 use reqwest::Client;
-use rustls::{Certificate, PrivateKey};
-use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
 use std::sync::Arc;
-use std::{fs::File, io, io::BufReader};
+use tls_helpers::{
+    certs_from_base64, from_base64_raw, privkey_from_base64, tls_acceptor_from_base64,
+};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio_rustls::TlsAcceptor;
 use tracing::{error, info};
 
 const LOGIN_PATH: &str = "/login";
@@ -43,19 +40,26 @@ pub struct IdpCreds {
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
-    pub signing_cert: Vec<u8>,
+    pub signing_cert: String,
 }
 
 pub struct IdpServer {
+    cert_pem_base64: String,
+    privkey_pem_base64: String,
     ssl_port: u16,
-    ssl_path: String,
     creds: Arc<IdpCreds>,
 }
 
 impl IdpServer {
-    pub fn new(ssl_path: String, ssl_port: u16, creds: IdpCreds) -> Self {
+    pub fn new(
+        cert_pem_base64: String,
+        privkey_pem_base64: String,
+        ssl_port: u16,
+        creds: IdpCreds,
+    ) -> Self {
         Self {
-            ssl_path,
+            cert_pem_base64,
+            privkey_pem_base64,
             ssl_port,
             creds: Arc::new(creds),
         }
@@ -67,22 +71,8 @@ impl IdpServer {
         let (tx, rx) = watch::channel(());
 
         let addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), self.ssl_port);
-
-        let crt_path = format!("{}/{}", self.ssl_path, "fullchain.pem");
-        let key_path = format!("{}/{}", self.ssl_path, "privkey.pem");
-
-        let crt_path = Path::new(&crt_path);
-        let key_path = Path::new(&key_path);
-
-        let certs = load_certs(crt_path)?;
-        let key = load_keys(key_path)?;
-
-        let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
-        server_config.alpn_protocols =
-            vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"http/1.0".to_vec()];
-        let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let tls_acceptor =
+            tls_acceptor_from_base64(&self.cert_pem_base64, &self.privkey_pem_base64)?;
 
         info!("idp server up at https://{}", addr);
 
@@ -129,11 +119,8 @@ impl IdpServer {
         tokio::spawn(srv_h2);
 
         {
-            let certs = Certificate(
-                std::fs::read(format!("{}/{}", self.ssl_path, "fullchain.der")).unwrap(),
-            );
-            let key =
-                PrivateKey(std::fs::read(format!("{}/{}", self.ssl_path, "privkey.der")).unwrap());
+            let certs = certs_from_base64(&self.cert_pem_base64)?;
+            let key = privkey_from_base64(&self.privkey_pem_base64)?;
 
             let mut tls_config = rustls::ServerConfig::builder()
                 .with_safe_default_cipher_suites()
@@ -141,7 +128,7 @@ impl IdpServer {
                 .with_protocol_versions(&[&rustls::version::TLS13])
                 .unwrap()
                 .with_no_client_auth()
-                .with_single_cert(vec![certs], key)
+                .with_single_cert(certs, key)
                 .unwrap();
 
             tls_config.max_early_data_size = u32::MAX;
@@ -382,22 +369,12 @@ pub fn get_claims(
     // for API calls. But we control the horizontal and the vertical and need
     // identity info.
     if let Some(token) = cookies.get("id_token") {
-        get_user(token, &creds.signing_cert, &creds.client_id)
+        let signing_cert = from_base64_raw(&creds.signing_cert)?;
+        get_user(token, &signing_cert, &creds.client_id)
     } else {
         Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::Other,
             "id_token not found",
         )) as Box<dyn std::error::Error + Send + Sync>)
     }
-}
-
-fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    certs(&mut BufReader::new(File::open(path)?)).collect()
-}
-
-fn load_keys(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
-    pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-        .next()
-        .unwrap()
-        .map(Into::into)
 }
