@@ -28,4 +28,4 @@ quinn = { version = "0.10", default-features = false, features = [
   "ring",
 ] }
 h3 = { git = "https://github.com/hyperium/h3.git", rev = "eb79204" }
-tls-helpers = { path = "../tls-helpers/" }
+tls-helpers = "0.1.3"
