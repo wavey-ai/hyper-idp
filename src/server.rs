@@ -1,5 +1,6 @@
 use crate::claims::{get_user, User};
 use crate::session::SessionStore;
+use crate::ui;
 use bytes::Bytes;
 use cookie::Cookie;
 use h3::server::RequestStream;
@@ -258,6 +259,13 @@ async fn request_handler(
     let mut res = http::Response::builder();
     let mut body = None;
     match (method, uri.path()) {
+        (&Method::GET, "/") | (&Method::GET, "/signin") => {
+            // Serve branded login page
+            res = res
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/html; charset=utf-8");
+            body = Some(ui::login_page());
+        }
         (&Method::GET, LOGIN_PATH) => {
             let location = format!(
         "https://{}/authorize?client_id={}&response_type=code&redirect_uri={}&scope=openid profile email offline_access",
@@ -281,12 +289,14 @@ async fn request_handler(
 
             // Create session
             let signing_cert = from_base64_raw(&ctx.creds.signing_cert)?;
+            let mut user_email = String::new();
             if let Ok(user) = get_user(&tokens.id_token, &signing_cert, &ctx.creds.client_id) {
+                user_email = user.email().unwrap_or_default().to_string();
                 let session_id = format!("{:x}", const_xxh3(tokens.access_token.as_bytes()));
                 ctx.sessions.create_session(
                     session_id.clone(),
                     user.id(),
-                    user.email().unwrap_or_default().to_string(),
+                    user_email.clone(),
                     tokens.access_token.clone(),
                     tokens.refresh_token.clone(),
                     tokens.expires_in as u64,
@@ -311,7 +321,9 @@ async fn request_handler(
             res = res
                 .header(SET_COOKIE, access_cookie)
                 .header(SET_COOKIE, id_cookie)
+                .header(CONTENT_TYPE, "text/html; charset=utf-8")
                 .status(StatusCode::OK);
+            body = Some(ui::callback_success_page(&user_email));
         }
         (&Method::GET, PROFILE_PATH) => match get_claims(headers, Arc::clone(&ctx.creds)) {
             Ok(user) => {
