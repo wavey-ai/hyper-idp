@@ -35,5 +35,4 @@ tracing-subscriber = "0.3"
 name = "hyper-idp"
 path = "src/main.rs"
 
-[dev-dependencies]
-auth = { git = "https://github.com/wavey-ai/auth.git" }
+# Dev dependencies removed for deployment - auth is only needed for examples
