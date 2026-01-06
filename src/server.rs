@@ -303,10 +303,14 @@ async fn request_handler(
                 ).await;
 
                 let session_cookie = format!(
-                    "session_id={}; HttpOnly; Path=/; Secure; SameSite=Strict; Max-Age={}",
+                    "session_id={}; HttpOnly; Path=/; Secure; SameSite=Lax; Domain=.wavey.io; Max-Age={}",
                     session_id, tokens.expires_in
                 );
-                res = res.header(SET_COOKIE, session_cookie);
+                let email_cookie = format!(
+                    "user_email={}; Path=/; Secure; SameSite=Lax; Domain=.wavey.io; Max-Age={}",
+                    user_email, tokens.expires_in
+                );
+                res = res.header(SET_COOKIE, session_cookie).header(SET_COOKIE, email_cookie);
             }
 
             let access_cookie = format!(
