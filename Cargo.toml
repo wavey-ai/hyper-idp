@@ -36,4 +36,4 @@ name = "hyper-idp"
 path = "src/main.rs"
 
 [dev-dependencies]
-auth = { path = "../auth" }
+auth = { git = "https://github.com/wavey-ai/auth.git" }
