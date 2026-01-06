@@ -12,6 +12,18 @@ impl User {
     pub fn id(&self) -> u64 {
         self.id
     }
+
+    pub fn email(&self) -> Option<&str> {
+        self.claims.email.as_deref()
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.claims.name.as_deref()
+    }
+
+    pub fn picture(&self) -> Option<&str> {
+        self.claims.picture.as_deref()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

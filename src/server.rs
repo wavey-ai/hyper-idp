@@ -1,4 +1,5 @@
 use crate::claims::{get_user, User};
+use crate::session::SessionStore;
 use bytes::Bytes;
 use cookie::Cookie;
 use h3::server::RequestStream;
@@ -21,18 +22,34 @@ use tls_helpers::{
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::{error, info};
+use xxhash_rust::const_xxh3::xxh3_64 as const_xxh3;
 
 const LOGIN_PATH: &str = "/login";
 const CALLBACK_PATH: &str = "/oauth2/callback";
 const LOGOUT_PATH: &str = "/logout";
 const PROFILE_PATH: &str = "/profile";
+const REFRESH_PATH: &str = "/refresh";
+const VALIDATE_PATH: &str = "/validate";
+const USERS_PATH: &str = "/users";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthTokenResponse {
     access_token: String,
     id_token: String,
+    refresh_token: Option<String>,
     expires_in: usize,
     token_type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ValidateResponse {
+    pub valid: bool,
+    pub user_id: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UsersResponse {
+    pub user_ids: Vec<u64>,
 }
 
 pub struct IdpCreds {
@@ -48,6 +65,12 @@ pub struct IdpServer {
     privkey_pem_base64: String,
     ssl_port: u16,
     creds: Arc<IdpCreds>,
+    sessions: Arc<SessionStore>,
+}
+
+struct RequestContext {
+    creds: Arc<IdpCreds>,
+    sessions: Arc<SessionStore>,
 }
 
 impl IdpServer {
@@ -57,12 +80,22 @@ impl IdpServer {
         ssl_port: u16,
         creds: IdpCreds,
     ) -> Self {
+        let sessions = Arc::new(SessionStore::new(3600)); // 1 hour default TTL
+
+        // Start background cleanup task
+        Arc::clone(&sessions).start_cleanup_task(300); // cleanup every 5 mins
+
         Self {
             cert_pem_base64,
             privkey_pem_base64,
             ssl_port,
             creds: Arc::new(creds),
+            sessions,
         }
+    }
+
+    pub fn sessions(&self) -> Arc<SessionStore> {
+        Arc::clone(&self.sessions)
     }
 
     pub async fn start(
@@ -77,13 +110,19 @@ impl IdpServer {
         info!("idp server up at https://{}", addr);
 
         let creds = Arc::clone(&self.creds);
+        let sessions = Arc::clone(&self.sessions);
         let srv_h2 = {
             let mut shutdown_signal = rx.clone();
 
             let creds = Arc::clone(&creds);
+            let sessions = Arc::clone(&sessions);
             async move {
                 let incoming = TcpListener::bind(&addr).await.unwrap();
-                let service = service_fn(move |req| handle_request_h2(req, Arc::clone(&creds)));
+                let ctx = Arc::new(RequestContext {
+                    creds: Arc::clone(&creds),
+                    sessions: Arc::clone(&sessions),
+                });
+                let service = service_fn(move |req| handle_request_h2(req, Arc::clone(&ctx)));
 
                 loop {
                     tokio::select! {
@@ -146,6 +185,7 @@ impl IdpServer {
             let endpoint = quinn::Endpoint::server(server_config, addr).unwrap();
 
             let creds = Arc::clone(&self.creds);
+            let sessions = Arc::clone(&self.sessions);
             let srv_h3 = {
                 let mut shutdown_signal = rx.clone();
 
@@ -158,7 +198,10 @@ impl IdpServer {
                             res = endpoint.accept()  => {
                                 if let Some(new_conn) = res {
                                     info!("New connection being attempted");
-                                    let creds = Arc::clone(&creds);
+                                    let ctx = Arc::new(RequestContext {
+                                        creds: Arc::clone(&creds),
+                                        sessions: Arc::clone(&sessions),
+                                    });
                                     tokio::spawn(async move {
                                         match new_conn.await {
                                             Ok(conn) => {
@@ -170,9 +213,9 @@ impl IdpServer {
                                                 loop {
                                                     match h3_conn.accept().await {
                                                         Ok(Some((req, stream))) => {
-                                                            let creds = Arc::clone(&creds);
+                                                            let ctx = Arc::clone(&ctx);
                                                             tokio::spawn(async move {
-                                                                if let Err(err) = handle_connection_h3(req, stream, Arc::clone(&creds)).await {
+                                                                if let Err(err) = handle_connection_h3(req, stream, ctx).await {
                                                                     error!("Failed to handle connection: {err:?}");
                                                                 }
                                                             });
@@ -210,15 +253,15 @@ async fn request_handler(
     method: &Method,
     headers: &http::HeaderMap,
     uri: &http::Uri,
-    creds: Arc<IdpCreds>,
+    ctx: Arc<RequestContext>,
 ) -> Result<(http::response::Builder, Option<Bytes>), Box<dyn std::error::Error + Send + Sync>> {
     let mut res = http::Response::builder();
     let mut body = None;
     match (method, uri.path()) {
         (&Method::GET, LOGIN_PATH) => {
             let location = format!(
-        "https://{}/authorize?client_id={}&response_type=code&redirect_uri={}&scope=openid profile email",
-        creds.audience, creds.client_id, creds.redirect_uri);
+        "https://{}/authorize?client_id={}&response_type=code&redirect_uri={}&scope=openid profile email offline_access",
+        ctx.creds.audience, ctx.creds.client_id, ctx.creds.redirect_uri);
             res = res
                 .header("location", location)
                 .status(StatusCode::TEMPORARY_REDIRECT);
@@ -234,14 +277,34 @@ async fn request_handler(
                 .map(|(_, v)| v.clone())
                 .unwrap();
 
-            let tokens = exchange_code_for_tokens(code, creds).await.unwrap();
+            let tokens = exchange_code_for_tokens(code, Arc::clone(&ctx.creds)).await.unwrap();
+
+            // Create session
+            let signing_cert = from_base64_raw(&ctx.creds.signing_cert)?;
+            if let Ok(user) = get_user(&tokens.id_token, &signing_cert, &ctx.creds.client_id) {
+                let session_id = format!("{:x}", const_xxh3(tokens.access_token.as_bytes()));
+                ctx.sessions.create_session(
+                    session_id.clone(),
+                    user.id(),
+                    user.email().unwrap_or_default().to_string(),
+                    tokens.access_token.clone(),
+                    tokens.refresh_token.clone(),
+                    tokens.expires_in as u64,
+                ).await;
+
+                let session_cookie = format!(
+                    "session_id={}; HttpOnly; Path=/; Secure; SameSite=Strict; Max-Age={}",
+                    session_id, tokens.expires_in
+                );
+                res = res.header(SET_COOKIE, session_cookie);
+            }
 
             let access_cookie = format!(
                 "access_token={}; HttpOnly; Path=/; Secure",
                 tokens.access_token
             );
             let id_cookie = format!(
-                "id_token={}; HttpOnly; Path=/; Secure;  SameSite=Strict",
+                "id_token={}; HttpOnly; Path=/; Secure; SameSite=Strict",
                 tokens.id_token
             );
 
@@ -250,16 +313,16 @@ async fn request_handler(
                 .header(SET_COOKIE, id_cookie)
                 .status(StatusCode::OK);
         }
-        (&Method::GET, PROFILE_PATH) => match get_claims(headers, creds) {
-            Ok(claims) => {
-                if let Ok(json_response) = serde_json::to_string(&claims) {
+        (&Method::GET, PROFILE_PATH) => match get_claims(headers, Arc::clone(&ctx.creds)) {
+            Ok(user) => {
+                if let Ok(json_response) = serde_json::to_string(&user) {
                     let body_bytes = Bytes::from(json_response);
                     res = res
                         .status(StatusCode::OK)
                         .header(CONTENT_TYPE, "application/json");
                     body = Some(body_bytes);
                 } else {
-                    error!("Serialization failed for claims: {:?}", &claims);
+                    error!("Serialization failed for user: {:?}", &user);
                 }
             }
             Err(e) => {
@@ -267,8 +330,88 @@ async fn request_handler(
                 res = res.status(StatusCode::UNAUTHORIZED);
             }
         },
-        (&Method::GET, LOGOUT_PATH) => {
-            res = res.status(StatusCode::NOT_FOUND);
+        (&Method::GET, VALIDATE_PATH) | (&Method::POST, VALIDATE_PATH) => {
+            // Validate session from cookie or query param
+            let session_id = get_session_id_from_request(headers, uri);
+            let response = if let Some(sid) = session_id {
+                if let Some(user_id) = ctx.sessions.validate_session(&sid).await {
+                    ValidateResponse { valid: true, user_id: Some(user_id) }
+                } else {
+                    ValidateResponse { valid: false, user_id: None }
+                }
+            } else {
+                ValidateResponse { valid: false, user_id: None }
+            };
+
+            if let Ok(json_response) = serde_json::to_string(&response) {
+                let body_bytes = Bytes::from(json_response);
+                res = res
+                    .status(StatusCode::OK)
+                    .header(CONTENT_TYPE, "application/json");
+                body = Some(body_bytes);
+            }
+        }
+        (&Method::GET, USERS_PATH) => {
+            // Return list of active user IDs (for gatekeeper allow list)
+            let user_ids = ctx.sessions.get_active_user_ids().await;
+            let response = UsersResponse { user_ids };
+
+            if let Ok(json_response) = serde_json::to_string(&response) {
+                let body_bytes = Bytes::from(json_response);
+                res = res
+                    .status(StatusCode::OK)
+                    .header(CONTENT_TYPE, "application/json");
+                body = Some(body_bytes);
+            }
+        }
+        (&Method::POST, LOGOUT_PATH) | (&Method::GET, LOGOUT_PATH) => {
+            let session_id = get_session_id_from_request(headers, uri);
+            if let Some(sid) = session_id {
+                ctx.sessions.remove_session(&sid).await;
+            }
+
+            // Clear cookies
+            let clear_session = "session_id=; HttpOnly; Path=/; Secure; SameSite=Strict; Max-Age=0";
+            let clear_access = "access_token=; HttpOnly; Path=/; Secure; Max-Age=0";
+            let clear_id = "id_token=; HttpOnly; Path=/; Secure; SameSite=Strict; Max-Age=0";
+
+            res = res
+                .header(SET_COOKIE, clear_session)
+                .header(SET_COOKIE, clear_access)
+                .header(SET_COOKIE, clear_id)
+                .status(StatusCode::OK);
+        }
+        (&Method::POST, REFRESH_PATH) => {
+            let session_id = get_session_id_from_request(headers, uri);
+            if let Some(sid) = session_id {
+                if let Some(session) = ctx.sessions.get_session(&sid).await {
+                    if let Some(refresh_token) = session.refresh_token {
+                        match refresh_access_token(refresh_token, Arc::clone(&ctx.creds)).await {
+                            Ok(tokens) => {
+                                ctx.sessions.refresh_session(&sid, tokens.access_token.clone(), tokens.expires_in as u64).await;
+
+                                let access_cookie = format!(
+                                    "access_token={}; HttpOnly; Path=/; Secure",
+                                    tokens.access_token
+                                );
+                                res = res
+                                    .header(SET_COOKIE, access_cookie)
+                                    .status(StatusCode::OK);
+                            }
+                            Err(e) => {
+                                error!("Token refresh failed: {e}");
+                                res = res.status(StatusCode::UNAUTHORIZED);
+                            }
+                        }
+                    } else {
+                        res = res.status(StatusCode::BAD_REQUEST);
+                    }
+                } else {
+                    res = res.status(StatusCode::UNAUTHORIZED);
+                }
+            } else {
+                res = res.status(StatusCode::UNAUTHORIZED);
+            }
         }
         _ => {
             res = res.status(StatusCode::NOT_FOUND);
@@ -278,12 +421,46 @@ async fn request_handler(
     Ok((res, body))
 }
 
+fn get_session_id_from_request(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
+    // Try cookie first
+    let mut cookie_string = String::new();
+    for header in headers.get_all(http::header::COOKIE) {
+        if let Ok(header_value) = header.to_str() {
+            if !cookie_string.is_empty() {
+                cookie_string.push(';');
+            }
+            cookie_string.push_str(header_value);
+        }
+    }
+
+    let cookies: HashMap<String, String> = cookie_string
+        .split(';')
+        .filter_map(|c| Cookie::parse(c.trim()).ok())
+        .map(|c| (c.name().to_owned(), c.value().to_owned()))
+        .collect();
+
+    if let Some(sid) = cookies.get("session_id") {
+        return Some(sid.clone());
+    }
+
+    // Try query param
+    if let Some(query) = uri.query() {
+        if let Ok(pairs) = serde_urlencoded::from_str::<Vec<(String, String)>>(query) {
+            if let Some((_, sid)) = pairs.iter().find(|(k, _)| k == "session_id") {
+                return Some(sid.clone());
+            }
+        }
+    }
+
+    None
+}
+
 async fn handle_connection_h3(
     req: Request<()>,
     mut stream: RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-    creds: Arc<IdpCreds>,
+    ctx: Arc<RequestContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match request_handler(req.method(), req.headers(), req.uri(), creds).await {
+    match request_handler(req.method(), req.headers(), req.uri(), ctx).await {
         Ok((res, body)) => {
             let initial_response = res.body(()).unwrap();
             if let Err(err) = stream.send_response(initial_response).await {
@@ -310,9 +487,9 @@ async fn handle_connection_h3(
 
 async fn handle_request_h2(
     req: http::Request<Incoming>,
-    creds: Arc<IdpCreds>,
+    ctx: Arc<RequestContext>,
 ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
-    let (res, body) = request_handler(req.method(), req.headers(), req.uri(), creds).await?;
+    let (res, body) = request_handler(req.method(), req.headers(), req.uri(), ctx).await?;
     if let Some(b) = body {
         Ok(res.body(Full::new(b)).unwrap())
     } else {
@@ -332,6 +509,30 @@ async fn exchange_code_for_tokens(
         ("client_secret", &creds.client_secret),
         ("code", &code),
         ("redirect_uri", &creds.redirect_uri),
+    ];
+
+    let response = client
+        .post(format!("https://{}/oauth/token", creds.audience))
+        .form(&params)
+        .send()
+        .await?
+        .json::<AuthTokenResponse>()
+        .await?;
+
+    Ok(response)
+}
+
+async fn refresh_access_token(
+    refresh_token: String,
+    creds: Arc<IdpCreds>,
+) -> Result<AuthTokenResponse, reqwest::Error> {
+    let client = Client::new();
+
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("client_id", &creds.client_id),
+        ("client_secret", &creds.client_secret),
+        ("refresh_token", &refresh_token),
     ];
 
     let response = client
