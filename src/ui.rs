@@ -168,18 +168,8 @@ pub fn callback_success_page(email: &str) -> Bytes {
         }}
         .checkmark svg {{ width: 32px; height: 32px; color: #fff; }}
         h1 {{ color: #fff; font-size: 24px; margin-bottom: 8px; }}
-        .email {{ color: rgba(255, 255, 255, 0.6); font-size: 14px; margin-bottom: 24px; }}
-        .btn {{
-            display: inline-block;
-            background: rgba(255, 255, 255, 0.1);
-            color: #fff;
-            padding: 12px 24px;
-            border-radius: 8px;
-            text-decoration: none;
-            font-size: 14px;
-            transition: background 0.2s;
-        }}
-        .btn:hover {{ background: rgba(255, 255, 255, 0.2); }}
+        .email {{ color: rgba(255, 255, 255, 0.6); font-size: 14px; margin-bottom: 16px; }}
+        .hint {{ color: rgba(255, 255, 255, 0.4); font-size: 13px; }}
     </style>
 </head>
 <body>
@@ -191,7 +181,7 @@ pub fn callback_success_page(email: &str) -> Bytes {
         </div>
         <h1>You're signed in!</h1>
         <p class="email">{email}</p>
-        <a href="/profile" class="btn">View Profile</a>
+        <p class="hint">You can close this window</p>
     </div>
 </body>
 </html>"#, email = email);
