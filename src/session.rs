@@ -1,3 +1,4 @@
+use crate::claims::UserIdentity;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -5,8 +6,7 @@ use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct Session {
-    pub user_id: u64,
-    pub email: String,
+    pub identity: UserIdentity,
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub created_at: Instant,
@@ -39,16 +39,14 @@ impl SessionStore {
     pub async fn create_session(
         &self,
         session_id: String,
-        user_id: u64,
-        email: String,
+        identity: UserIdentity,
         access_token: String,
         refresh_token: Option<String>,
         expires_in_secs: u64,
     ) -> Session {
         let now = Instant::now();
         let session = Session {
-            user_id,
-            email,
+            identity,
             access_token,
             refresh_token,
             created_at: now,
@@ -63,7 +61,7 @@ impl SessionStore {
         {
             let mut user_sessions = self.user_sessions.write().await;
             user_sessions
-                .entry(user_id)
+                .entry(session.identity.id)
                 .or_insert_with(Vec::new)
                 .push(session_id);
         }
@@ -80,7 +78,7 @@ impl SessionStore {
         let sessions = self.sessions.read().await;
         if let Some(session) = sessions.get(session_id) {
             if !session.is_expired() {
-                return Some(session.user_id);
+                return Some(session.identity.id);
             }
         }
         None
@@ -105,7 +103,7 @@ impl SessionStore {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.remove(session_id) {
             let mut user_sessions = self.user_sessions.write().await;
-            if let Some(user_sids) = user_sessions.get_mut(&session.user_id) {
+            if let Some(user_sids) = user_sessions.get_mut(&session.identity.id) {
                 user_sids.retain(|s| s != session_id);
             }
             return true;
@@ -135,7 +133,7 @@ impl SessionStore {
         sessions
             .values()
             .filter(|s| s.expires_at > now)
-            .map(|s| s.user_id)
+            .map(|s| s.identity.id)
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect()
@@ -156,7 +154,7 @@ impl SessionStore {
 
         for sid in expired {
             if let Some(session) = sessions.remove(&sid) {
-                if let Some(user_sids) = user_sessions.get_mut(&session.user_id) {
+                if let Some(user_sids) = user_sessions.get_mut(&session.identity.id) {
                     user_sids.retain(|s| s != &sid);
                 }
             }

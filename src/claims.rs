@@ -2,10 +2,20 @@ use jsonwebtoken::{decode, errors::Result as JwtResult, Algorithm, DecodingKey, 
 use serde::{Deserialize, Serialize};
 use xxhash_rust::const_xxh3::xxh3_64 as const_xxh3;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     claims: Claims,
     id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserIdentity {
+    pub subject: String,
+    pub email: String,
+    pub email_verified: bool,
+    pub name: Option<String>,
+    pub picture: Option<String>,
+    pub id: u64,
 }
 
 impl User {
@@ -13,8 +23,16 @@ impl User {
         self.id
     }
 
+    pub fn subject(&self) -> Option<&str> {
+        self.claims.sub.as_deref()
+    }
+
     pub fn email(&self) -> Option<&str> {
         self.claims.email.as_deref()
+    }
+
+    pub fn email_verified(&self) -> bool {
+        self.claims.email_verified.unwrap_or(true)
     }
 
     pub fn name(&self) -> Option<&str> {
@@ -24,13 +42,32 @@ impl User {
     pub fn picture(&self) -> Option<&str> {
         self.claims.picture.as_deref()
     }
+
+    pub fn identity(&self) -> Result<UserIdentity, Box<dyn std::error::Error + Send + Sync>> {
+        let email = self
+            .email()
+            .ok_or_else(|| "Email is missing in JWT claims".to_string())?;
+
+        Ok(UserIdentity {
+            subject: self
+                .subject()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("wavey:{}", self.id)),
+            email: email.to_string(),
+            email_verified: self.email_verified(),
+            name: self.name().map(str::to_owned),
+            picture: self.picture().map(str::to_owned),
+            id: self.id,
+        })
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     sub: Option<String>,
     exp: Option<usize>,
     email: Option<String>,
+    email_verified: Option<bool>,
     name: Option<String>,
     picture: Option<String>,
 }

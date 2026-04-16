@@ -3,7 +3,8 @@ use bytes::Bytes;
 const WAVEY_LOGO_BASE64: &str = include_str!("../assets/wavey-128.b64");
 
 pub fn login_page() -> Bytes {
-    let html = format!(r#"<!DOCTYPE html>
+    let html = format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -123,13 +124,16 @@ pub fn login_page() -> Bytes {
         </div>
     </div>
 </body>
-</html>"#, logo = WAVEY_LOGO_BASE64.trim());
+</html>"#,
+        logo = WAVEY_LOGO_BASE64.trim()
+    );
 
     Bytes::from(html)
 }
 
 pub fn callback_success_page(email: &str) -> Bytes {
-    let html = format!(r#"<!DOCTYPE html>
+    let html = format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -184,7 +188,9 @@ pub fn callback_success_page(email: &str) -> Bytes {
         <p class="hint">You can close this window</p>
     </div>
 </body>
-</html>"#, email = email);
+</html>"#,
+        email = email
+    );
 
     Bytes::from(html)
 }

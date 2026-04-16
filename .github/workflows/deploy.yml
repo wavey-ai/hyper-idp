@@ -49,10 +49,13 @@ jobs:
           {
             printf 'RUST_LOG=info\n'
             printf 'PORT=443\n'
+            printf 'ISSUER_URL=https://%s\n' "${IDP_FQDN}"
+            printf 'COOKIE_DOMAIN=.wavey.io\n'
             printf 'REDIRECT_URI=https://%s/oauth2/callback\n' "${IDP_FQDN}"
             printf 'OIDC_AUDIENCE=%s\n' "${OIDC_AUDIENCE}"
             printf 'OIDC_CLIENT_ID=%s\n' "${OIDC_CLIENT_ID}"
             printf 'OIDC_CLIENT_SECRET=%s\n' "${OIDC_CLIENT_SECRET}"
+            printf 'LOCAL_OIDC_GROUPS=headlamp:admins\n'
             printf 'SIGNING_CERT_BASE64=%s\n' "${SIGNING_CERT_BASE64}"
           } > /tmp/hyper-idp.env
           chmod 600 /tmp/hyper-idp.env
