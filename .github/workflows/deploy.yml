@@ -1,0 +1,95 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hyper-idp-production
+  cancel-in-progress: true
+
+env:
+  IDP_FQDN: idp.wavey.io
+  TLS_DOMAIN: wavey.io
+  REMOTE_APP_DIR: /opt/hyper-idp
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          IDP_HOST: ${{ secrets.IDP_HOST }}
+          IDP_SSH_KEY: ${{ secrets.IDP_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$IDP_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$IDP_HOST" >> ~/.ssh/known_hosts
+
+      - name: Render Runtime Env
+        env:
+          OIDC_AUDIENCE: ${{ secrets.OIDC_AUDIENCE }}
+          OIDC_CLIENT_ID: ${{ secrets.OIDC_CLIENT_ID }}
+          OIDC_CLIENT_SECRET: ${{ secrets.OIDC_CLIENT_SECRET }}
+          SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'RUST_LOG=info\n'
+            printf 'PORT=443\n'
+            printf 'REDIRECT_URI=https://%s/oauth2/callback\n' "${IDP_FQDN}"
+            printf 'OIDC_AUDIENCE=%s\n' "${OIDC_AUDIENCE}"
+            printf 'OIDC_CLIENT_ID=%s\n' "${OIDC_CLIENT_ID}"
+            printf 'OIDC_CLIENT_SECRET=%s\n' "${OIDC_CLIENT_SECRET}"
+            printf 'SIGNING_CERT_BASE64=%s\n' "${SIGNING_CERT_BASE64}"
+          } > /tmp/hyper-idp.env
+          chmod 600 /tmp/hyper-idp.env
+
+      - name: Sync Repo
+        env:
+          IDP_HOST: ${{ secrets.IDP_HOST }}
+          IDP_SSH_USER: ${{ secrets.IDP_SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh "${IDP_SSH_USER}@${IDP_HOST}" \
+            "set -euo pipefail; install -d -m 755 ${REMOTE_APP_DIR}; find ${REMOTE_APP_DIR} -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +"
+          tar \
+            --exclude .git \
+            --exclude target \
+            -czf - . \
+            | ssh "${IDP_SSH_USER}@${IDP_HOST}" "tar -xzf - -C ${REMOTE_APP_DIR}"
+
+      - name: Upload Env
+        env:
+          IDP_HOST: ${{ secrets.IDP_HOST }}
+          IDP_SSH_USER: ${{ secrets.IDP_SSH_USER }}
+        run: |
+          set -euo pipefail
+          scp /tmp/hyper-idp.env "${IDP_SSH_USER}@${IDP_HOST}:/tmp/hyper-idp.env"
+
+      - name: Deploy On Host
+        env:
+          IDP_HOST: ${{ secrets.IDP_HOST }}
+          IDP_SSH_USER: ${{ secrets.IDP_SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh "${IDP_SSH_USER}@${IDP_HOST}" \
+            "TLS_DOMAIN=${TLS_DOMAIN} bash ${REMOTE_APP_DIR}/scripts/deploy-host.sh ${REMOTE_APP_DIR} /tmp/hyper-idp.env"
+
+      - name: Verify Login Redirect
+        run: |
+          set -euo pipefail
+          code="$(curl -sS -o /dev/null -w '%{http_code}' "https://${IDP_FQDN}/login")"
+          [[ "${code}" == "307" ]]
