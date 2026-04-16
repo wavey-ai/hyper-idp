@@ -18,6 +18,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let local_client_secret = env::var("LOCAL_OIDC_CLIENT_SECRET")
         .or_else(|_| env::var("AUTH0_CLIENT_SECRET"))
         .expect("LOCAL_OIDC_CLIENT_SECRET or AUTH0_CLIENT_SECRET required");
+    let local_token_ttl_secs = env::var("LOCAL_OIDC_TOKEN_TTL_SECS")
+        .unwrap_or_else(|_| "3600".into())
+        .parse()?;
+    let local_groups: Vec<String> = env::var("LOCAL_OIDC_GROUPS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let internal_issuer_url = env::var("INTERNAL_ISSUER_URL")
+        .unwrap_or_else(|_| format!("{}/internal", issuer_url.trim_end_matches('/')));
+    let internal_client_id =
+        env::var("INTERNAL_OIDC_CLIENT_ID").unwrap_or_else(|_| local_client_id.clone());
+    let internal_client_secret =
+        env::var("INTERNAL_OIDC_CLIENT_SECRET").unwrap_or_else(|_| local_client_secret.clone());
+    let internal_token_ttl_secs = env::var("INTERNAL_OIDC_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(local_token_ttl_secs);
+    let internal_groups = env::var("INTERNAL_OIDC_GROUPS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_else(|| local_groups.clone());
 
     let creds = IdpCreds {
         audience: env::var("AUTH0_DOMAIN").unwrap_or_else(|_| "your-tenant.auth0.com".into()),
@@ -27,22 +60,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         signing_cert: env::var("AUTH0_SIGNING_CERT_BASE64")
             .expect("AUTH0_SIGNING_CERT_BASE64 required"),
         issuer_url: issuer_url.clone(),
+        internal_issuer_url,
         local_client_id,
         local_client_secret,
         cookie_domain,
-        local_token_ttl_secs: env::var("LOCAL_OIDC_TOKEN_TTL_SECS")
-            .unwrap_or_else(|_| "3600".into())
-            .parse()?,
-        local_groups: env::var("LOCAL_OIDC_GROUPS")
+        local_token_ttl_secs,
+        local_groups,
+        internal_client_id,
+        internal_client_secret,
+        internal_token_ttl_secs,
+        internal_groups,
+        internal_allowed_email_domains: env::var("INTERNAL_ALLOWED_EMAIL_DOMAINS")
+            .or_else(|_| env::var("ALLOWED_EMAIL_DOMAINS"))
             .ok()
             .map(|raw| {
                 raw.split(',')
                     .map(str::trim)
+                    .map(|part| part.trim_start_matches('@').to_ascii_lowercase())
                     .filter(|part| !part.is_empty())
-                    .map(str::to_owned)
                     .collect()
             })
-            .unwrap_or_default(),
+            .unwrap_or_else(|| vec!["wavey.ai".to_string()]),
     };
 
     let port = env::var("SSO_PORT")

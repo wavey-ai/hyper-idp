@@ -194,3 +194,71 @@ pub fn callback_success_page(email: &str) -> Bytes {
 
     Bytes::from(html)
 }
+
+pub fn access_denied_page(email: Option<&str>, message: &str) -> Bytes {
+    let email_html = email
+        .map(|email| format!(r#"<p class="email">{email}</p>"#))
+        .unwrap_or_default();
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Access denied - wavey</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #261919 0%, #3d1f1f 50%, #5a2525 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .container {{
+            background: rgba(255, 255, 255, 0.06);
+            backdrop-filter: blur(10px);
+            border-radius: 24px;
+            padding: 48px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            max-width: 420px;
+            width: 90%;
+        }}
+        .icon {{
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 24px;
+            background: #ef4444;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .icon svg {{ width: 30px; height: 30px; color: #fff; }}
+        h1 {{ color: #fff; font-size: 24px; margin-bottom: 12px; }}
+        .email {{ color: rgba(255, 255, 255, 0.65); font-size: 14px; margin-bottom: 12px; }}
+        .message {{ color: rgba(255, 255, 255, 0.8); font-size: 15px; line-height: 1.5; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+        </div>
+        <h1>Access denied</h1>
+        {email_html}
+        <p class="message">{message}</p>
+    </div>
+</body>
+</html>"#,
+        email_html = email_html,
+        message = message
+    );
+
+    Bytes::from(html)
+}
