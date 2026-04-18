@@ -56,6 +56,7 @@ jobs:
             printf 'OIDC_CLIENT_ID=%s\n' "${OIDC_CLIENT_ID}"
             printf 'OIDC_CLIENT_SECRET=%s\n' "${OIDC_CLIENT_SECRET}"
             printf 'LOCAL_OIDC_GROUPS=headlamp:admins\n'
+            printf 'INTERNAL_ALLOWED_EMAIL_DOMAINS=wavey.ai\n'
             printf 'SIGNING_CERT_BASE64=%s\n' "${SIGNING_CERT_BASE64}"
           } > /tmp/hyper-idp.env
           chmod 600 /tmp/hyper-idp.env
