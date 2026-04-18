@@ -46,6 +46,18 @@ const REFRESH_PATH: &str = "/refresh";
 const VALIDATE_PATH: &str = "/validate";
 const USERS_PATH: &str = "/users";
 
+const SESSION_COOKIE_NAME: &str = "wavey_session_v2";
+const LOGIN_POLICY_COOKIE_NAME: &str = "wavey_login_policy_v2";
+const USER_EMAIL_COOKIE_NAME: &str = "wavey_user_email_v2";
+const ACCESS_TOKEN_COOKIE_NAME: &str = "wavey_access_token_v2";
+const ID_TOKEN_COOKIE_NAME: &str = "wavey_id_token_v2";
+
+const LEGACY_SESSION_COOKIE_NAME: &str = "session_id";
+const LEGACY_LOGIN_POLICY_COOKIE_NAME: &str = "login_policy";
+const LEGACY_USER_EMAIL_COOKIE_NAME: &str = "user_email";
+const LEGACY_ACCESS_TOKEN_COOKIE_NAME: &str = "access_token";
+const LEGACY_ID_TOKEN_COOKIE_NAME: &str = "id_token";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoginPolicy {
     Public,
@@ -345,6 +357,9 @@ async fn request_handler(
                 policy = login_policy_name(policy),
                 "starting upstream login"
             );
+            for cookie in clear_auth_cookies(&ctx.creds.cookie_domain) {
+                res = res.header(SET_COOKIE, cookie);
+            }
             res = res
                 .header(
                     SET_COOKIE,
@@ -598,27 +613,26 @@ async fn request_handler(
                     .await;
 
                 let session_cookie = format!(
-                    "session_id={}; HttpOnly; Path=/; Secure; SameSite=Lax; Domain={}; Max-Age={}",
+                    "{SESSION_COOKIE_NAME}={}; HttpOnly; Path=/; Secure; SameSite=Lax; Domain={}; Max-Age={}",
                     session_id, ctx.creds.cookie_domain, tokens.expires_in
                 );
                 let email_cookie = format!(
-                    "user_email={}; Path=/; Secure; SameSite=Lax; Domain={}; Max-Age={}",
+                    "{USER_EMAIL_COOKIE_NAME}={}; Path=/; Secure; SameSite=Lax; Domain={}; Max-Age={}",
                     user_email, ctx.creds.cookie_domain, tokens.expires_in
                 );
                 let access_cookie = format!(
-                    "access_token={}; HttpOnly; Path=/; Secure",
+                    "{ACCESS_TOKEN_COOKIE_NAME}={}; HttpOnly; Path=/; Secure",
                     tokens.access_token
                 );
                 let id_cookie = format!(
-                    "id_token={}; HttpOnly; Path=/; Secure; SameSite=Strict",
+                    "{ID_TOKEN_COOKIE_NAME}={}; HttpOnly; Path=/; Secure; SameSite=Strict",
                     tokens.id_token
                 );
 
+                for cookie in clear_auth_cookies(&ctx.creds.cookie_domain) {
+                    res = res.header(SET_COOKIE, cookie);
+                }
                 res = res
-                    .header(
-                        SET_COOKIE,
-                        clear_login_policy_cookie(&ctx.creds.cookie_domain),
-                    )
                     .header(SET_COOKIE, session_cookie)
                     .header(SET_COOKIE, email_cookie)
                     .header(SET_COOKIE, access_cookie)
@@ -802,25 +816,10 @@ async fn request_handler(
                 ctx.sessions.remove_session(&sid).await;
             }
 
-            let clear_session = format!(
-                "session_id=; HttpOnly; Path=/; Secure; SameSite=Strict; Domain={}; Max-Age=0",
-                ctx.creds.cookie_domain
-            );
-            let clear_email = format!(
-                "user_email=; Path=/; Secure; SameSite=Strict; Domain={}; Max-Age=0",
-                ctx.creds.cookie_domain
-            );
-            let clear_login_policy = clear_login_policy_cookie(&ctx.creds.cookie_domain);
-            let clear_access = "access_token=; HttpOnly; Path=/; Secure; Max-Age=0";
-            let clear_id = "id_token=; HttpOnly; Path=/; Secure; SameSite=Strict; Max-Age=0";
-
-            res = res
-                .header(SET_COOKIE, clear_session)
-                .header(SET_COOKIE, clear_email)
-                .header(SET_COOKIE, clear_login_policy)
-                .header(SET_COOKIE, clear_access)
-                .header(SET_COOKIE, clear_id)
-                .status(StatusCode::OK);
+            for cookie in clear_auth_cookies(&ctx.creds.cookie_domain) {
+                res = res.header(SET_COOKIE, cookie);
+            }
+            res = res.status(StatusCode::OK);
         }
         (&Method::POST, REFRESH_PATH) => {
             if let Some(sid) = get_session_id_from_request(headers, uri) {
@@ -837,7 +836,7 @@ async fn request_handler(
                                     .await;
 
                                 let access_cookie = format!(
-                                    "access_token={}; HttpOnly; Path=/; Secure",
+                                    "{ACCESS_TOKEN_COOKIE_NAME}={}; HttpOnly; Path=/; Secure",
                                     tokens.access_token
                                 );
                                 res = res.header(SET_COOKIE, access_cookie).status(StatusCode::OK);
@@ -881,7 +880,7 @@ fn login_policy_name(policy: LoginPolicy) -> &'static str {
 
 fn login_policy_cookie(policy: LoginPolicy, cookie_domain: &str, max_age: usize) -> String {
     format!(
-        "login_policy={}; HttpOnly; Path=/; Secure; SameSite=Lax; Domain={}; Max-Age={}",
+        "{LOGIN_POLICY_COOKIE_NAME}={}; HttpOnly; Path=/; Secure; SameSite=Lax; Domain={}; Max-Age={}",
         login_policy_name(policy),
         cookie_domain,
         max_age
@@ -890,18 +889,53 @@ fn login_policy_cookie(policy: LoginPolicy, cookie_domain: &str, max_age: usize)
 
 fn clear_login_policy_cookie(cookie_domain: &str) -> String {
     format!(
-        "login_policy=; HttpOnly; Path=/; Secure; SameSite=Strict; Domain={}; Max-Age=0",
+        "{LOGIN_POLICY_COOKIE_NAME}=; HttpOnly; Path=/; Secure; SameSite=Strict; Domain={}; Max-Age=0",
         cookie_domain
     )
 }
 
 fn login_policy_from_request(headers: &http::HeaderMap) -> Option<LoginPolicy> {
     let cookies = request_cookies(headers);
-    match cookies.get("login_policy").map(String::as_str) {
+    match cookies.get(LOGIN_POLICY_COOKIE_NAME).map(String::as_str) {
         Some("internal") => Some(LoginPolicy::Internal),
         Some("public") => Some(LoginPolicy::Public),
         _ => None,
     }
+}
+
+fn clear_cookie_with_domain(name: &str, cookie_domain: &str) -> String {
+    format!(
+        "{name}=; HttpOnly; Path=/; Secure; SameSite=Strict; Domain={cookie_domain}; Max-Age=0"
+    )
+}
+
+fn clear_plain_cookie_with_domain(name: &str, cookie_domain: &str) -> String {
+    format!("{name}=; Path=/; Secure; SameSite=Strict; Domain={cookie_domain}; Max-Age=0")
+}
+
+fn clear_cookie(name: &str) -> String {
+    format!("{name}=; HttpOnly; Path=/; Secure; Max-Age=0")
+}
+
+fn clear_strict_cookie(name: &str) -> String {
+    format!("{name}=; HttpOnly; Path=/; Secure; SameSite=Strict; Max-Age=0")
+}
+
+fn clear_auth_cookies(cookie_domain: &str) -> Vec<String> {
+    vec![
+        clear_cookie_with_domain(SESSION_COOKIE_NAME, cookie_domain),
+        clear_cookie_with_domain(LEGACY_SESSION_COOKIE_NAME, cookie_domain),
+        clear_plain_cookie_with_domain(USER_EMAIL_COOKIE_NAME, cookie_domain),
+        clear_plain_cookie_with_domain(LEGACY_USER_EMAIL_COOKIE_NAME, cookie_domain),
+        clear_login_policy_cookie(cookie_domain),
+        format!(
+            "{LEGACY_LOGIN_POLICY_COOKIE_NAME}=; HttpOnly; Path=/; Secure; SameSite=Strict; Domain={cookie_domain}; Max-Age=0"
+        ),
+        clear_cookie(ACCESS_TOKEN_COOKIE_NAME),
+        clear_cookie(LEGACY_ACCESS_TOKEN_COOKIE_NAME),
+        clear_strict_cookie(ID_TOKEN_COOKIE_NAME),
+        clear_strict_cookie(LEGACY_ID_TOKEN_COOKIE_NAME),
+    ]
 }
 
 fn session_matches_policy(ctx: &RequestContext, policy: LoginPolicy, session: &Session) -> bool {
@@ -1015,7 +1049,7 @@ fn request_cookies(headers: &http::HeaderMap) -> HashMap<String, String> {
 
 fn get_session_id_from_request(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
     let cookies = request_cookies(headers);
-    if let Some(session_id) = cookies.get("session_id") {
+    if let Some(session_id) = cookies.get(SESSION_COOKIE_NAME) {
         return Some(session_id.clone());
     }
 
@@ -1183,7 +1217,7 @@ pub fn get_claims(
     creds: Arc<IdpCreds>,
 ) -> Result<User, Box<dyn std::error::Error + Send + Sync>> {
     let cookies = request_cookies(headers);
-    if let Some(token) = cookies.get("id_token") {
+    if let Some(token) = cookies.get(ID_TOKEN_COOKIE_NAME) {
         let signing_cert = from_base64_raw(&creds.signing_cert)?;
         get_user(token, &signing_cert, &creds.client_id)
     } else {
